@@ -23,9 +23,10 @@ async function getJSON(path) { const f = await gh(`contents/${path}?ref=main&t=$
 async function putFile(path, bytes, sha, message) { return gh(`contents/${path}`, {method: "PUT", body: JSON.stringify({message, content: b64enc(bytes), sha, branch: "main"})}); }
 async function putJSON(path, data, sha, message) { return putFile(path, new TextEncoder().encode(JSON.stringify(data, null, 1)), sha, message); }
 async function majTextes(fn, message) { // lecture → modification → écriture (réessaie si quelqu'un a modifié entre-temps)
+  oublier("textes", "runs");
   for (let i = 0; i < 3; i++) { const {data, sha} = await getJSON("data/textes.json"); fn(data); try { return await putJSON("data/textes.json", data, sha, message); } catch (e) { if (i === 2) throw e; } }
 }
-async function majConfig(fn, message) { const {data, sha} = await getJSON("data/config.json"); fn(data); await putJSON("data/config.json", data, sha, message); return data; }
+async function majConfig(fn, message) { oublier("cfg"); const {data, sha} = await getJSON("data/config.json"); fn(data); await putJSON("data/config.json", data, sha, message); return data; }
 async function setSecret(name, value) { // chiffrement « sealed box » exigé par GitHub
   const [{default: nacl}, {blake2b}] = await Promise.all([import("https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/+esm"), import("https://cdn.jsdelivr.net/npm/blakejs@1.2.1/+esm")]);
   const {key, key_id} = await gh("actions/secrets/public-key");
@@ -66,9 +67,23 @@ function reglerCle(msg = "") {
 }
 
 // ---------------- état : textes + exécutions GitHub + vidéos publiées
+// ---------------- cache : on affiche tout de suite ce qu'on connaît, puis on met à jour en arrière-plan
+let CACHE = {}; try { CACHE = JSON.parse(LS("tl_cache") || "{}"); } catch (e) {}
+const sauverCache = () => { try { localStorage.setItem("tl_cache", JSON.stringify({textes: CACHE.textes, cfg: CACHE.cfg, runs: CACHE.runs, rel: CACHE.rel})); } catch (e) {} };
+async function charge(key, fn) {
+  if (CACHE[key] !== undefined) {
+    if (Date.now() - (charge.t[key] || 0) < 15000) return CACHE[key];
+    charge.t[key] = Date.now();
+    fn().then(v => { if (JSON.stringify(v) !== JSON.stringify(CACHE[key])) { CACHE[key] = v; sauverCache(); if ($("#sheet").hidden) render(true); } }).catch(() => {});
+    return CACHE[key];
+  }
+  CACHE[key] = await fn(); sauverCache(); return CACHE[key];
+}
+charge.t = {};
+const oublier = (...ks) => ks.forEach(k => { delete CACHE[k]; delete charge.t[k]; });
 async function etat() {
-  const [{data: textes}, runs, rel] = await Promise.all([getJSON("data/textes.json"),
-    gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []})), gh("releases?per_page=60").catch(() => [])]);
+  const [textes, runs, rel] = await Promise.all([charge("textes", async () => (await getJSON("data/textes.json")).data),
+    charge("runs", () => gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []}))), charge("rel", () => gh("releases?per_page=60").catch(() => []))]);
   const releases = Object.fromEntries(rel.filter(r => r.tag_name.startsWith("video-")).map(r => [r.tag_name.slice(6), r]));
   const vids = runs.workflow_runs.map(r => {
     const uid = uidDe(r.name || ""); const t = textes.find(x => x.uid === uid) || {};
@@ -152,7 +167,7 @@ async function lancer(t, uid, voix) {
 
 // ---------------- Textes
 async function textes() {
-  const {data: ts} = await getJSON("data/textes.json");
+  const ts = await charge("textes", async () => (await getJSON("data/textes.json")).data);
   const prets = ts.filter(t => t.statut === "pret");
   const ids = [...new Set(prets.map(t => t.livre))]; const vis = prets.filter(t => filtre === "tous" || t.livre === filtre);
   app.innerHTML = `<h1>Textes<b>.</b></h1>
@@ -226,7 +241,7 @@ async function ouvrirVideo(uid) {
 
 // ---------------- Profil
 async function profil() {
-  const {data: cfg} = await getJSON("data/config.json");
+  const cfg = await charge("cfg", async () => (await getJSON("data/config.json")).data);
   app.innerHTML = `<h1>Profil<b>.</b></h1>
     <h2>Comptes ElevenLabs</h2>
     ${cfg.comptes.map(c => `<div class="card" style="${c.actif !== false ? "" : "opacity:.55"}"><div class="row"><div class="grow"><div class="t1">${esc(c.nom)}</div>
@@ -261,7 +276,8 @@ async function profil() {
 
 // ---------------- navigation
 function go(t) { tab = t; render(); }
-async function render() {
+async function render(silencieux) {
+  if (!silencieux && !CACHE.textes) app.innerHTML = `<div class="empty" style="padding-top:40vh">Chargement…</div>`;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   if (!TOKEN) return reglerCle();
   try { await ({accueil, textes, videos, profil})[tab](); } catch (e) { if (e.message !== "connexion") toast(e.message); }
