@@ -49,11 +49,19 @@ function reglerCle(msg = "") {
     <label>Compte GitHub</label><input id="ow" value="${esc(OWNER)}">
     <label>Dépôt des vidéos</label><input id="rp" value="${esc(REPO)}">
     <label>Clé GitHub</label><input id="tk" type="password" autocomplete="off" value="">
-    <button class="btn acc" id="go">Se connecter</button>`);
+    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 3</p>`);
   $("#go").onclick = async () => {
     OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.replace(/[^\x21-\x7e]/g, "");
-    try { await gh(""); LSset("tl_owner", OWNER); LSset("tl_repo", REPO); LSset("tl_token", TOKEN); closeSheet(); await chargerLivres(); render(); }
-    catch (e) { toast("Connexion impossible : " + e.message); }
+    let etape = "internet";
+    try {
+      await fetch("https://api.github.com/zen").then(r => { if (!r.ok && r.status !== 403) throw new Error("GitHub " + r.status); });
+      etape = "clé"; await gh("");
+      etape = "données"; await chargerLivres();
+      LSset("tl_owner", OWNER); LSset("tl_repo", REPO); LSset("tl_token", TOKEN); closeSheet(); render();
+    } catch (e) {
+      const m = {internet: "Impossible de joindre GitHub (connexion internet ou bloqueur de contenu ?)", clé: "GitHub refuse la clé ou le dépôt", données: "Le dépôt ne contient pas les données attendues"}[etape];
+      $("#err").textContent = `${m} — détail : ${e.message}`;
+    }
   };
 }
 
