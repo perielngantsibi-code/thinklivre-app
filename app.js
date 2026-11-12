@@ -68,7 +68,7 @@ function reglerCle(msg = "") {
     <label>Compte GitHub</label><input id="ow" value="${esc(OWNER)}">
     <label>Dépôt des vidéos</label><input id="rp" value="${esc(REPO)}">
     <label>Clé GitHub</label><input id="tk" type="password" autocomplete="off" value="">
-    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 9</p>`);
+    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 10</p>`);
   $("#go").onclick = () => une("go", async () => {
     OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.replace(/[^\x21-\x7e]/g, "");
     let etape = "internet";
@@ -166,6 +166,15 @@ async function asset(id) {
 function bindVideoRows() { document.querySelectorAll(".vrow").forEach(r => r.onclick = () => ouvrirVideo(r.dataset.uid)); }
 function poll() { clearTimeout(timer); timer = setTimeout(() => { if (["accueil", "videos"].includes(tab) && $("#sheet").hidden) render(); }, 30000); }
 
+async function raisonErreur(run) {
+  try {
+    const jobs = await gh(`actions/runs/${run.id}/jobs`);
+    for (const j of jobs.jobs) { const ann = await gh(`check-runs/${j.id}/annotations`);
+      const e = ann.find(a => a.annotation_level === "failure" && a.title === "Vidéo non fabriquée") || ann.find(a => a.annotation_level === "failure" && !/exit code/.test(a.message));
+      if (e) return e.message; }
+    return "Raison inconnue : regarde le détail sur GitHub.";
+  } catch (e) { return "Raison indisponible pour le moment."; }
+}
 // ---------------- Accueil
 async function accueil() {
   const {textes, vids} = await etat(); VIDS = vids;
@@ -266,9 +275,10 @@ async function videos() {
 async function ouvrirVideo(uid) {
   const v = VIDS.find(x => x.uid === uid); if (!v) return;
   if (v.statut === "erreur") {
-    sheet(`<h1>Erreur<b>.</b></h1><p class="desc">La fabrication a échoué. Tu peux remettre le texte en réserve pour le relancer, ou voir le détail sur GitHub.</p>
+    sheet(`<h1>Erreur<b>.</b></h1><p class="desc">La fabrication a échoué.</p><div class="card desc" id="raison">Recherche de la raison…</div><p class="desc">Tu peux remettre le texte en réserve pour le relancer, ou voir le détail sur GitHub.</p>
       <a class="btn ghost" href="${esc(v.run.html_url)}" target="_blank" rel="noopener" style="text-decoration:none">Voir le détail</a>
       <button class="btn acc" id="re" style="margin-top:10px">Remettre le texte en réserve</button>`);
+    raisonErreur(v.run).then(m => { const el = $("#raison"); if (el) el.textContent = m; });
     $("#re").onclick = () => une("re", async () => { await majTextes(d => { const x = d.find(y => y.uid === uid); if (x) x.statut = "pret"; }, "Texte remis en réserve"); closeSheet(); render(); }, $("#re"));
     return;
   }
