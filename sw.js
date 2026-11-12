@@ -1,5 +1,5 @@
 // Garde une copie de l'appli pour qu'elle s'ouvre même sans réseau (les données restent sur GitHub).
-const C = "thinklivre-v7";
+const C = "thinklivre-v8";
 const FICHIERS = ["./", "index.html", "app.js", "style.css", "manifest.json", "icon-192.png", "icon-180.png", "vendor/tweetnacl.mjs", "vendor/blakejs.mjs"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(C).then(c => c.addAll(FICHIERS)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== C).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

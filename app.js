@@ -63,7 +63,7 @@ function reglerCle(msg = "") {
     <label>Compte GitHub</label><input id="ow" value="${esc(OWNER)}">
     <label>Dépôt des vidéos</label><input id="rp" value="${esc(REPO)}">
     <label>Clé GitHub</label><input id="tk" type="password" autocomplete="off" value="">
-    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 7</p>`);
+    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 8</p>`);
   $("#go").onclick = () => une("go", async () => {
     OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.replace(/[^\x21-\x7e]/g, "");
     let etape = "internet";
@@ -95,19 +95,20 @@ async function charge(key, fn) {
 charge.t = {};
 const oublier = (...ks) => ks.forEach(k => { delete CACHE[k]; delete charge.t[k]; });
 async function etat() {
-  const [textes, runs, rel] = await Promise.all([charge("textes", async () => (await getJSON("data/textes.json")).data),
-    charge("runs", () => gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []}))), charge("rel", () => gh("releases?per_page=100").catch(() => []))]);
+  const [textes, runs, rel, pub] = await Promise.all([charge("textes", async () => (await getJSON("data/textes.json")).data),
+    charge("runs", () => gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []}))), charge("rel", () => gh("releases?per_page=100").catch(() => [])), charge("pub", relPubliques)]);
+  const PUBS = new Set(pub);
   const releases = Object.fromEntries(rel.filter(r => r.tag_name.startsWith("video-")).map(r => [r.tag_name.slice(6), r]));
   const texteDe = uid => textes.find(x => x.uid === uid || (x.publies || []).includes(uid)) || {};
   const publiee = (t, uid) => (t.publies || []).includes(uid) || (t.statut === "publie" && t.uid === uid);
   const vids = runs.workflow_runs.map(r => {
     const uid = uidDe(r.name || ""); const t = texteDe(uid);
     const statut = releases[uid] ? (publiee(t, uid) ? "publiee" : "prete") : r.status !== "completed" ? (r.status === "in_progress" ? "en_cours" : "attente") : "erreur";
-    return {uid, run: r, rel: releases[uid], texte: t, statut, sujet: t.sujet || (r.name || "").replace(/^🎬 | \[.*$/g, ""), livre: t.livre};
+    return {uid, run: r, rel: releases[uid], pub: PUBS.has(uid), texte: t, statut, sujet: t.sujet || (r.name || "").replace(/^🎬 | \[.*$/g, ""), livre: t.livre};
   }).filter(v => v.uid);
   const vus = new Set(vids.map(v => v.uid));
   for (const [uid, rl] of Object.entries(releases)) if (!vus.has(uid)) {
-    const t = texteDe(uid); vids.push({uid, run: null, rel: rl, texte: t, statut: publiee(t, uid) ? "publiee" : "prete", sujet: t.sujet || rl.name || "Vidéo", livre: t.livre});
+    const t = texteDe(uid); vids.push({uid, run: null, rel: rl, pub: PUBS.has(uid), texte: t, statut: publiee(t, uid) ? "publiee" : "prete", sujet: t.sujet || rl.name || "Vidéo", livre: t.livre});
   }
   return {textes, vids};
 }
@@ -119,7 +120,7 @@ function progression(v) { // estimation : environ 25 min par vidéo
 }
 function videoRow(v) {
   return `<div class="card row vrow" data-uid="${v.uid}">
-    <div class="thumb" ${v.rel ? `data-thumb="${v.uid}"` : ""}></div>
+    ${v.pub ? `<img class="thumb" src="${urlPub(v.uid, "miniature.jpg")}" alt="">` : `<div class="thumb" ${v.rel ? `data-thumb="${v.uid}"` : ""}></div>`}
     <div class="grow"><div class="t1">${esc(v.sujet)}</div><div class="t2">${esc(livreTitre(v.livre))}</div>
       ${["attente", "en_cours"].includes(v.statut) ? `<div class="bar"><i style="width:${progression(v)}%"></i></div>` : ""}</div>${statutPill(v)}</div>`;
 }
@@ -130,6 +131,16 @@ async function miniatures() {
     try { const url = await asset(a.id); el.outerHTML = `<img class="thumb" src="${url}" alt="">`; } catch (e) {}
   }
 }
+// ---------------- copies publiques (dépôt thinklivre-app) : lisibles directement sur iPhone
+const PUB = "thinklivre-app";
+const urlPub = (uid, f) => `https://github.com/${OWNER}/${PUB}/releases/download/video-${uid}/${f}`;
+async function relPubliques() {
+  const r = await fetch(`https://api.github.com/repos/${OWNER}/${PUB}/releases?per_page=100`, {headers: {Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json"}}).catch(() => null);
+  if (!r || !r.ok) return [];
+  return (await r.json()).filter(x => x.tag_name.startsWith("video-") && x.assets.some(a => a.name === "video.mp4")).map(x => x.tag_name.slice(6));
+}
+async function lectureActivee() { try { await gh("actions/secrets/PUBLIER_TOKEN"); return true; } catch (e) { return false; } }
+async function activerLecture() { await setSecret("PUBLIER_TOKEN", TOKEN); oublier("lecture"); toast("Lecture activée ✓ pour les prochaines vidéos"); }
 const _assets = {};
 async function asset(id) {
   if (_assets[id]) return _assets[id];
@@ -255,11 +266,16 @@ async function ouvrirVideo(uid) {
     ${v.statut === "prete" ? `<button class="btn ghost" id="pub">✓ Marquer comme publiée</button>` : `<span class="pill ok">Publiée</span>`}`);
   $("#copier").onclick = () => navigator.clipboard.writeText(v.rel.body || "").then(() => toast("Description copiée"));
   if ($("#pub")) $("#pub").onclick = () => une("pub", async () => { await majTextes(d => { const x = d.find(y => y.uid === uid || (y.publies || []).includes(uid)); if (x) { x.publies = [...new Set([...(x.publies || []), uid])]; if (x.uid === uid) x.statut = "publie"; } }, "Vidéo publiée"); closeSheet(); toast("Bravo 🎉"); render(); }, $("#pub"));
-  try {
-    const url = await asset(mp4.id);
-    $("#lecteur").outerHTML = `<video src="${url}" controls playsinline></video><a class="btn acc" href="${url}" download="ThinkLivre_${slug(v.sujet)}.mp4" style="text-decoration:none">⬇ Enregistrer la vidéo</a>`;
-  } catch (e) {
-    $("#lecteur").outerHTML = `<a class="btn acc" href="${esc(v.rel.html_url)}" target="_blank" rel="noopener" style="text-decoration:none">⬇ Ouvrir la vidéo sur GitHub</a>`;
+  if (v.pub) {
+    const u = urlPub(uid, "video.mp4");
+    $("#lecteur").outerHTML = `<video src="${u}" controls playsinline preload="metadata"></video>
+      <a class="btn acc" href="${u}" target="_blank" rel="noopener" style="text-decoration:none">⬇ Enregistrer la vidéo</a>
+      <p class="t2" style="white-space:normal;margin-top:8px">La vidéo s'ouvre : appuie sur <b>Partager ↑</b> puis <b>« Enregistrer la vidéo »</b> pour la mettre dans Photos.</p>`;
+  } else {
+    const active = await charge("lecture", lectureActivee);
+    $("#lecteur").outerHTML = `${active ? "" : `<div class="card"><div class="t1">Lire les vidéos dans l'appli</div><p class="t2" style="white-space:normal">À activer une seule fois : les prochaines vidéos se liront et s'enregistreront directement ici.</p><button class="btn acc sm" id="activer">Activer</button></div>`}
+      <a class="btn ghost" href="${esc(mp4.browser_download_url || v.rel.html_url)}" target="_blank" rel="noopener" style="text-decoration:none">Ouvrir cette vidéo sur GitHub</a>`;
+    if ($("#activer")) $("#activer").onclick = () => une("activer", async () => { await activerLecture(); closeSheet(); }, $("#activer"));
   }
 }
 
@@ -278,6 +294,8 @@ async function profil() {
     <h2>Voix officielle</h2>
     <div class="card"><label>Nom de la voix</label><input id="vn" value="${esc(cfg.voice_nom)}">
       <label>Voice ID (ElevenLabs → la voix → « ID »)</label><input id="vi" value="${esc(cfg.voice_id)}"><button class="btn acc sm" id="savev">Enregistrer la voix</button></div>
+    <h2>Lecture des vidéos</h2>
+    <div class="card" id="lect"><div class="t2">Vérification…</div></div>
     <h2>Connexion GitHub</h2>
     <div class="card"><div class="t2">Dépôt : ${esc(OWNER)}/${esc(REPO)}</div><button class="btn ghost sm" id="cle" style="margin-top:10px">Changer la clé GitHub</button>
       <button class="btn ghost sm" id="deco" style="margin-top:10px">Se déconnecter de ce téléphone</button></div>`;
@@ -294,6 +312,10 @@ async function profil() {
     catch (e) { toast(e.message); }
   }, $("#addc"));
   $("#savev").onclick = () => une("cfg", async () => { await majConfig(c => { c.voice_nom = $("#vn").value.trim(); c.voice_id = $("#vi").value.trim(); }, "Voix officielle"); toast("Voix enregistrée"); }, $("#savev"));
+  charge("lecture", lectureActivee).then(ok => { const el = $("#lect"); if (!el) return;
+    el.innerHTML = ok ? `<div class="t1">✓ Activée</div><div class="t2" style="white-space:normal">Les nouvelles vidéos se lisent et s'enregistrent dans l'appli.</div>`
+      : `<div class="t1">Pas encore activée</div><p class="t2" style="white-space:normal">Une fois activée, les nouvelles vidéos se lisent directement dans l'appli.</p><button class="btn acc sm" id="activer2">Activer</button>`;
+    if ($("#activer2")) $("#activer2").onclick = () => une("activer", async () => { await activerLecture(); profil(); }, $("#activer2")); });
   $("#cle").onclick = () => reglerCle();
   $("#deco").onclick = () => { if (confirm("Effacer la clé GitHub de ce téléphone ?")) { LSset("tl_token", ""); TOKEN = ""; reglerCle(); } };
 }
