@@ -11,7 +11,7 @@ const WF = "video.yml";
 
 // ---------------- API GitHub
 async function gh(path, opts = {}) {
-  const r = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/${path}`, {...opts,
+  const r = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}${path ? "/" + path : ""}`, {...opts,
     headers: {Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json", ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers || {})}});
   if (r.status === 401) { reglerCle("Ta clé GitHub n'est plus valide."); throw new Error("connexion"); }
   if (!r.ok && r.status !== 204) { const e = await r.json().catch(() => ({})); throw new Error(e.message || `Erreur GitHub ${r.status}`); }
@@ -51,7 +51,7 @@ function reglerCle(msg = "") {
     <label>Clé GitHub</label><input id="tk" type="password" autocomplete="off" value="">
     <button class="btn acc" id="go">Se connecter</button>`);
   $("#go").onclick = async () => {
-    OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.trim();
+    OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.replace(/[^\x21-\x7e]/g, "");
     try { await gh(""); LSset("tl_owner", OWNER); LSset("tl_repo", REPO); LSset("tl_token", TOKEN); closeSheet(); await chargerLivres(); render(); }
     catch (e) { toast("Connexion impossible : " + e.message); }
   };
