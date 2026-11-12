@@ -12,14 +12,21 @@ const WF = "video.yml";
 // ---------------- API GitHub
 async function gh(path, opts = {}) {
   const r = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}${path ? "/" + path : ""}`, {...opts,
-    headers: {Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json", ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers || {})}});
+    headers: {Authorization: `Bearer ${TOKEN}`, Accept: "application/vnd.github+json", ...(opts.body ? {"Content-Type": "application/json"} : {}), ...(opts.headers || {})}})
+    .catch(() => { throw new Error("Pas de connexion internet. Réessaie dans un instant."); });
   if (r.status === 401) { reglerCle("Ta clé GitHub n'est plus valide."); throw new Error("connexion"); }
   if (!r.ok && r.status !== 204) { const e = await r.json().catch(() => ({})); throw new Error(e.message || `Erreur GitHub ${r.status}`); }
   return r.status === 204 ? null : r.json();
 }
 const b64dec = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
 const b64enc = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000)); return btoa(s); };
-async function getJSON(path) { const f = await gh(`contents/${path}?ref=main&t=${Date.now()}`); return {data: JSON.parse(b64dec(f.content)), sha: f.sha}; }
+async function getJSON(path) {
+  const f = await gh(`contents/${path}?ref=main&t=${Date.now()}`);
+  if (f.content) return {data: JSON.parse(b64dec(f.content)), sha: f.sha};
+  // au-delà de 1 Mo, GitHub ne renvoie pas le contenu : on le demande « brut »
+  const data = await gh(`contents/${path}?ref=main&t=${Date.now()}`, {headers: {Accept: "application/vnd.github.raw+json"}});
+  return {data, sha: f.sha};
+}
 async function putFile(path, bytes, sha, message) { return gh(`contents/${path}`, {method: "PUT", body: JSON.stringify({message, content: b64enc(bytes), sha, branch: "main"})}); }
 async function putJSON(path, data, sha, message) { return putFile(path, new TextEncoder().encode(JSON.stringify(data, null, 1)), sha, message); }
 async function majTextes(fn, message) { // lecture → modification → écriture (réessaie si quelqu'un a modifié entre-temps)
@@ -28,7 +35,7 @@ async function majTextes(fn, message) { // lecture → modification → écritur
 }
 async function majConfig(fn, message) { oublier("cfg"); const {data, sha} = await getJSON("data/config.json"); fn(data); await putJSON("data/config.json", data, sha, message); return data; }
 async function setSecret(name, value) { // chiffrement « sealed box » exigé par GitHub
-  const [{default: nacl}, {blake2b}] = await Promise.all([import("https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/+esm"), import("https://cdn.jsdelivr.net/npm/blakejs@1.2.1/+esm")]);
+  const [{default: nacl}, {blake2b}] = await Promise.all([import("./vendor/tweetnacl.mjs"), import("./vendor/blakejs.mjs")]);
   const {key, key_id} = await gh("actions/secrets/public-key");
   const pk = Uint8Array.from(atob(key), c => c.charCodeAt(0)), eph = nacl.box.keyPair();
   const nonce = blake2b(new Uint8Array([...eph.publicKey, ...pk]), undefined, 24);
@@ -36,6 +43,12 @@ async function setSecret(name, value) { // chiffrement « sealed box » exigé p
   await gh(`actions/secrets/${name}`, {method: "PUT", body: JSON.stringify({encrypted_value: b64enc(new Uint8Array([...eph.publicKey, ...boxed])), key_id})});
 }
 
+// ---------------- anti double appui : le bouton est bloqué tant que l'action n'est pas finie
+const _verrous = new Set();
+async function une(cle, fn, bouton) {
+  if (_verrous.has(cle)) return; _verrous.add(cle); if (bouton) bouton.disabled = true;
+  try { return await fn(); } catch (e) { if (e.message !== "connexion") toast(e.message); } finally { _verrous.delete(cle); if (bouton && bouton.isConnected) bouton.disabled = false; }
+}
 // ---------------- outils d'affichage
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; setTimeout(() => t.hidden = true, 2400); }
 function sheet(html) { const s = $("#sheet"); s.innerHTML = `<div>${html}</div>`; s.hidden = false; s.onclick = e => { if (e.target === s) closeSheet(); }; }
@@ -46,12 +59,12 @@ const uidDe = name => (name.match(/\[([a-z0-9]+)\]$/) || [])[1];
 
 function reglerCle(msg = "") {
   sheet(`<h1>Connexion<b>.</b></h1>${msg ? `<p class="desc" style="color:#FF5A5A">${esc(msg)}</p>` : ""}
-    <p class="desc">Colle ta <b>clé GitHub</b> (elle commence par <b>github_pat_</b>). Elle reste uniquement sur ce téléphone.</p>
+    <p class="desc">Colle ta <b>clé GitHub</b> (elle commence par <b>ghp_</b> ou <b>github_pat_</b>). Elle reste uniquement sur ce téléphone.</p>
     <label>Compte GitHub</label><input id="ow" value="${esc(OWNER)}">
     <label>Dépôt des vidéos</label><input id="rp" value="${esc(REPO)}">
     <label>Clé GitHub</label><input id="tk" type="password" autocomplete="off" value="">
-    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 3</p>`);
-  $("#go").onclick = async () => {
+    <button class="btn acc" id="go">Se connecter</button><p id="err" class="desc" style="color:#FF5A5A;margin-top:12px"></p><p class="t2">version 7</p>`);
+  $("#go").onclick = () => une("go", async () => {
     OWNER = $("#ow").value.trim(); REPO = $("#rp").value.trim(); TOKEN = $("#tk").value.replace(/[^\x21-\x7e]/g, "");
     let etape = "internet";
     try {
@@ -63,7 +76,7 @@ function reglerCle(msg = "") {
       const m = {internet: "Impossible de joindre GitHub (connexion internet ou bloqueur de contenu ?)", clé: "GitHub refuse la clé ou le dépôt", données: "Le dépôt ne contient pas les données attendues"}[etape];
       $("#err").textContent = `${m} — détail : ${e.message}`;
     }
-  };
+  }, $("#go"));
 }
 
 // ---------------- état : textes + exécutions GitHub + vidéos publiées
@@ -83,13 +96,19 @@ charge.t = {};
 const oublier = (...ks) => ks.forEach(k => { delete CACHE[k]; delete charge.t[k]; });
 async function etat() {
   const [textes, runs, rel] = await Promise.all([charge("textes", async () => (await getJSON("data/textes.json")).data),
-    charge("runs", () => gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []}))), charge("rel", () => gh("releases?per_page=60").catch(() => []))]);
+    charge("runs", () => gh(`actions/workflows/${WF}/runs?per_page=40`).catch(() => ({workflow_runs: []}))), charge("rel", () => gh("releases?per_page=100").catch(() => []))]);
   const releases = Object.fromEntries(rel.filter(r => r.tag_name.startsWith("video-")).map(r => [r.tag_name.slice(6), r]));
+  const texteDe = uid => textes.find(x => x.uid === uid || (x.publies || []).includes(uid)) || {};
+  const publiee = (t, uid) => (t.publies || []).includes(uid) || (t.statut === "publie" && t.uid === uid);
   const vids = runs.workflow_runs.map(r => {
-    const uid = uidDe(r.name || ""); const t = textes.find(x => x.uid === uid) || {};
-    const statut = releases[uid] ? (t.statut === "publie" ? "publiee" : "prete") : r.status !== "completed" ? (r.status === "in_progress" ? "en_cours" : "attente") : "erreur";
+    const uid = uidDe(r.name || ""); const t = texteDe(uid);
+    const statut = releases[uid] ? (publiee(t, uid) ? "publiee" : "prete") : r.status !== "completed" ? (r.status === "in_progress" ? "en_cours" : "attente") : "erreur";
     return {uid, run: r, rel: releases[uid], texte: t, statut, sujet: t.sujet || (r.name || "").replace(/^🎬 | \[.*$/g, ""), livre: t.livre};
   }).filter(v => v.uid);
+  const vus = new Set(vids.map(v => v.uid));
+  for (const [uid, rl] of Object.entries(releases)) if (!vus.has(uid)) {
+    const t = texteDe(uid); vids.push({uid, run: null, rel: rl, texte: t, statut: publiee(t, uid) ? "publiee" : "prete", sujet: t.sujet || rl.name || "Vidéo", livre: t.livre});
+  }
   return {textes, vids};
 }
 const statutPill = v => ({attente: `<span class="pill">En attente</span>`, en_cours: `<span class="pill">Fabrication…</span>`,
@@ -133,7 +152,7 @@ async function accueil() {
   <div class="grid2"><div class="card stat"><div class="n">${prets.length}</div><div class="l">textes en réserve</div></div>
     <div class="card stat"><div class="n">${vids.filter(v => v.statut === "prete").length}</div><div class="l">vidéos à publier</div></div></div>
   <h2>Récentes</h2>${vids.slice(0, 6).map(videoRow).join("") || `<div class="empty">Aucune vidéo pour l'instant.</div>`}`;
-  if (p) $("#creer").onclick = () => creer([p]);
+  if (p) $("#creer").onclick = () => une("creer", () => creer([p]), $("#creer"));
   bindVideoRows(); miniatures();
   if (vids.some(v => ["attente", "en_cours"].includes(v.statut))) poll();
 }
@@ -160,9 +179,10 @@ async function creer(ts) {
   selection.clear();
 }
 async function lancer(t, uid, voix) {
-  await majTextes(d => { const x = d.find(y => y.id === t.id); if (x) { x.statut = "en_cours"; x.uid = uid; } }, "Création : " + t.sujet);
   await gh(`actions/workflows/${WF}/dispatches`, {method: "POST", body: JSON.stringify({ref: "main", inputs: {texte: t.id, sujet: (t.sujet || "vidéo").slice(0, 80), uid, voix}})});
-  toast("Vidéo lancée 🎬 (environ 25 min)"); setTimeout(() => go("videos"), 1500);
+  try { await majTextes(d => { const x = d.find(y => y.id === t.id); if (x) { x.statut = "en_cours"; x.uid = uid; } }, "Création : " + t.sujet); }
+  catch (e) { toast("Vidéo lancée, mais le texte n'a pas pu être mis à jour"); }
+  toast("Vidéo lancée 🎬 (environ 30 min)"); setTimeout(() => go("videos"), 1500);
 }
 
 // ---------------- Textes
@@ -183,14 +203,14 @@ async function textes() {
     selection.has(r.dataset.id) ? selection.delete(r.dataset.id) : selection.add(r.dataset.id); textes();
   });
   $("#ajouter").onclick = ajouterTexte;
-  if (selection.size) $("#lot").onclick = () => creer(ts.filter(t => selection.has(t.id)));
+  if (selection.size) $("#lot").onclick = () => une("creer", () => creer(ts.filter(t => selection.has(t.id))), $("#lot"));
 }
 function voirTexte(t) {
   sheet(`<h1>${esc(t.sujet || "Texte")}<b>.</b></h1><div class="t2" style="margin-bottom:12px">${esc(livreTitre(t.livre))}</div>
     <div class="card desc">${esc(t.script)}</div><button class="btn acc" id="c1">● Créer cette vidéo</button>
     <button class="btn ghost" id="del" style="margin-top:10px">Supprimer ce texte</button>`);
-  $("#c1").onclick = () => { closeSheet(); creer([t]); };
-  $("#del").onclick = async () => { if (confirm("Supprimer ce texte ?")) { await majTextes(d => d.splice(d.findIndex(x => x.id === t.id), 1), "Suppression d'un texte"); closeSheet(); textes(); } };
+  $("#c1").onclick = () => une("creer", async () => { closeSheet(); await creer([t]); }, $("#c1"));
+  $("#del").onclick = () => une("del", async () => { if (confirm("Supprimer ce texte ?")) { await majTextes(d => { const i = d.findIndex(x => x.id === t.id); if (i >= 0) d.splice(i, 1); }, "Suppression d'un texte"); closeSheet(); textes(); } }, $("#del"));
 }
 function ajouterTexte() {
   sheet(`<h1>Nouveau texte<b>.</b></h1>
@@ -198,11 +218,11 @@ function ajouterTexte() {
     <label>Sujet (ex. « La dispute de couple »)</label><input id="s">
     <label>Texte de la voix (une phrase par ligne)</label><textarea id="sc"></textarea>
     <label>Description TikTok</label><textarea id="d" style="min-height:120px"></textarea><button class="btn acc" id="ok">Enregistrer</button>`);
-  $("#ok").onclick = async () => {
+  $("#ok").onclick = () => une("ok", async () => {
     const t = {id: Math.random().toString(36).slice(2, 10), livre: $("#l").value, sujet: $("#s").value.trim(), hook: "", script: $("#sc").value.trim(), description: $("#d").value.trim(), statut: "pret", cree: Date.now() / 1000};
     if (t.script.length < 50) return toast("Le texte est trop court");
-    await majTextes(d => d.push(t), "Nouveau texte : " + t.sujet); closeSheet(); toast("Texte ajouté"); textes();
-  };
+    await majTextes(d => { if (!d.some(x => x.id === t.id)) d.push(t); }, "Nouveau texte : " + t.sujet); closeSheet(); toast("Texte ajouté"); textes();
+  }, $("#ok"));
 }
 
 // ---------------- Vidéos
@@ -218,9 +238,13 @@ async function videos() {
 }
 async function ouvrirVideo(uid) {
   const v = VIDS.find(x => x.uid === uid); if (!v) return;
-  if (v.statut === "erreur") return sheet(`<h1>Erreur<b>.</b></h1><p class="desc">La fabrication a échoué. Tu peux relancer ce texte, ou voir le détail sur GitHub.</p>
-      <a class="btn ghost" href="${v.run.html_url}" target="_blank" rel="noopener" style="text-decoration:none">Voir le détail</a>
-      <button class="btn acc" id="re" style="margin-top:10px">Remettre le texte en réserve</button>`) || ($("#re").onclick = async () => { await majTextes(d => { const x = d.find(y => y.uid === uid); if (x) x.statut = "pret"; }, "Texte remis en réserve"); closeSheet(); render(); });
+  if (v.statut === "erreur") {
+    sheet(`<h1>Erreur<b>.</b></h1><p class="desc">La fabrication a échoué. Tu peux remettre le texte en réserve pour le relancer, ou voir le détail sur GitHub.</p>
+      <a class="btn ghost" href="${esc(v.run.html_url)}" target="_blank" rel="noopener" style="text-decoration:none">Voir le détail</a>
+      <button class="btn acc" id="re" style="margin-top:10px">Remettre le texte en réserve</button>`);
+    $("#re").onclick = () => une("re", async () => { await majTextes(d => { const x = d.find(y => y.uid === uid); if (x) x.statut = "pret"; }, "Texte remis en réserve"); closeSheet(); render(); }, $("#re"));
+    return;
+  }
   if (!v.rel) return sheet(`<h1>En cours<b>.</b></h1><div class="card"><div class="t1">Fabrication par GitHub</div><div class="bar"><i style="width:${progression(v)}%"></i></div></div>
       <p class="t2" style="white-space:normal">Environ 25 minutes. Tu peux fermer l'appli, la vidéo continue.</p><button class="btn ghost" onclick="closeSheet()">Fermer</button>`);
   const mp4 = v.rel.assets.find(a => a.name === "video.mp4");
@@ -230,12 +254,12 @@ async function ouvrirVideo(uid) {
     <div class="card" style="margin-top:12px;font-size:13px;line-height:1.5">Après la publication : réponds aux commentaires « LIVRE » avec le lien du livre 📚</div>
     ${v.statut === "prete" ? `<button class="btn ghost" id="pub">✓ Marquer comme publiée</button>` : `<span class="pill ok">Publiée</span>`}`);
   $("#copier").onclick = () => navigator.clipboard.writeText(v.rel.body || "").then(() => toast("Description copiée"));
-  if ($("#pub")) $("#pub").onclick = async () => { await majTextes(d => { const x = d.find(y => y.uid === uid); if (x) x.statut = "publie"; }, "Vidéo publiée"); closeSheet(); toast("Bravo 🎉"); render(); };
+  if ($("#pub")) $("#pub").onclick = () => une("pub", async () => { await majTextes(d => { const x = d.find(y => y.uid === uid || (y.publies || []).includes(uid)); if (x) { x.publies = [...new Set([...(x.publies || []), uid])]; if (x.uid === uid) x.statut = "publie"; } }, "Vidéo publiée"); closeSheet(); toast("Bravo 🎉"); render(); }, $("#pub"));
   try {
     const url = await asset(mp4.id);
     $("#lecteur").outerHTML = `<video src="${url}" controls playsinline></video><a class="btn acc" href="${url}" download="ThinkLivre_${slug(v.sujet)}.mp4" style="text-decoration:none">⬇ Enregistrer la vidéo</a>`;
   } catch (e) {
-    $("#lecteur").outerHTML = `<a class="btn acc" href="${v.rel.html_url}" target="_blank" rel="noopener" style="text-decoration:none">⬇ Ouvrir la vidéo sur GitHub</a>`;
+    $("#lecteur").outerHTML = `<a class="btn acc" href="${esc(v.rel.html_url)}" target="_blank" rel="noopener" style="text-decoration:none">⬇ Ouvrir la vidéo sur GitHub</a>`;
   }
 }
 
@@ -257,19 +281,19 @@ async function profil() {
     <h2>Connexion GitHub</h2>
     <div class="card"><div class="t2">Dépôt : ${esc(OWNER)}/${esc(REPO)}</div><button class="btn ghost sm" id="cle" style="margin-top:10px">Changer la clé GitHub</button>
       <button class="btn ghost sm" id="deco" style="margin-top:10px">Se déconnecter de ce téléphone</button></div>`;
-  document.querySelectorAll(".bascule").forEach(b => b.onclick = async () => { await majConfig(c => { const x = c.comptes.find(y => y.secret === b.dataset.s); x.actif = x.actif === false; }, "Compte ElevenLabs activé/désactivé"); profil(); });
-  document.querySelectorAll(".suppr").forEach(b => b.onclick = async () => {
+  document.querySelectorAll(".bascule").forEach(b => b.onclick = () => une("cfg", async () => { await majConfig(c => { const x = c.comptes.find(y => y.secret === b.dataset.s); if (x) x.actif = x.actif === false; }, "Compte ElevenLabs activé/désactivé"); profil(); }, b));
+  document.querySelectorAll(".suppr").forEach(b => b.onclick = () => une("cfg", async () => {
     if (!confirm("Retirer ce compte ?")) return;
     await gh(`actions/secrets/${b.dataset.s}`, {method: "DELETE"}).catch(() => {});
     await majConfig(c => { c.comptes = c.comptes.filter(y => y.secret !== b.dataset.s); }, "Compte ElevenLabs retiré"); profil();
-  });
-  $("#addc").onclick = async () => {
+  }));
+  $("#addc").onclick = () => une("cfg", async () => {
     const nom = $("#cn").value.trim(), key = $("#ck").value.trim(); if (!nom || !key) return toast("Nom et clé obligatoires");
     const secret = "EL_" + Math.random().toString(36).slice(2, 10).toUpperCase();
     try { await setSecret(secret, key); await majConfig(c => c.comptes.push({nom, secret, actif: true}), "Compte ElevenLabs ajouté"); toast("Compte ajouté"); profil(); }
     catch (e) { toast(e.message); }
-  };
-  $("#savev").onclick = async () => { await majConfig(c => { c.voice_nom = $("#vn").value.trim(); c.voice_id = $("#vi").value.trim(); }, "Voix officielle"); toast("Voix enregistrée"); };
+  }, $("#addc"));
+  $("#savev").onclick = () => une("cfg", async () => { await majConfig(c => { c.voice_nom = $("#vn").value.trim(); c.voice_id = $("#vi").value.trim(); }, "Voix officielle"); toast("Voix enregistrée"); }, $("#savev"));
   $("#cle").onclick = () => reglerCle();
   $("#deco").onclick = () => { if (confirm("Effacer la clé GitHub de ce téléphone ?")) { LSset("tl_token", ""); TOKEN = ""; reglerCle(); } };
 }
@@ -286,4 +310,5 @@ async function chargerLivres() {
   const {data} = await getJSON("catalogue/livres.json"); livres = data.livres.map(b => ({...b, id: slug(b.titre)}));
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 (async () => { if (TOKEN) { try { await chargerLivres(); } catch (e) {} } render(); })();
